@@ -1,68 +1,64 @@
 # freepbx_install
 
-Неофициальный wrapper для установки **FreePBX 17 на Debian 12 без коммерческого Sangoma Endpoint Manager (`endpoint`)**.
+Неофициальный wrapper для установки **FreePBX 17 на Debian 12 без проблемной коммерческой цепочки**:
 
-Скрипты загружают актуальный официальный установщик FreePBX, проверяют ожидаемую структуру и создают временную изменённую копию. Официальный файл в репозитории не хранится.
+```text
+sangomaconnect → restapps → endpoint
+```
+
+Скрипты загружают актуальный официальный установщик FreePBX, проверяют его структуру и создают временную изменённую копию. Официальный установщик в этом репозитории не хранится.
 
 ## Зафиксированная проблема
 
-Официальная установка может остановиться на массовом обновлении модулей:
+Официальная установка может остановиться на Endpoint Manager:
 
 ```text
-Upgrading FreePBX 17 modules
-Upgrading module 'endpoint' ...
-Checking Settings and Defaults...
-```
-
-После прерывания состояние обычно выглядит так:
-
-```text
-endpoint  17.0.3  Disabled; Pending upgrade to 17.0.16.3
-```
-
-Первая попытка просто удалить `endpoint` перед `upgradeall` оказалась недостаточной. Во время обновления `restapps` менеджер модулей обнаруживает отсутствующую зависимость и автоматически скачивает `endpoint` обратно:
-
-```text
-Upgrading module 'restapps' ...
-Detected Missing Dependency of: endpoint
-Downloading Missing Dependency of: endpoint
 Installing Missing Dependency of: endpoint
+Checking database tables...Done
+Migrating tables as required...Done
 Checking Settings and Defaults...
 ```
 
-Поэтому версия 0.3.0 делает две обязательные вещи:
+Выявлены две цепочки, которые повторно устанавливают удалённый `endpoint`.
 
-1. исключает одновременно `restapps` и `endpoint`;
-2. полностью пропускает `fwconsole ma upgradeall` во время установки.
+### Через массовое обновление модулей
 
-Это позволяет официальному скрипту выполнить завершающие шаги, не возвращаясь к проблемной цепочке зависимостей.
+```text
+fwconsole ma upgradeall
+  restapps
+    Detected Missing Dependency of: endpoint
+```
 
-## Файлы
+### Через финальное обновление подписей
 
-### `install.sh`
+```text
+fwconsole ma refreshsignatures
+  sangomaconnect
+    Detected Missing Dependency of: restapps
+      Detected Missing Dependency of: endpoint
+```
 
-Для новой установки. Скрипт:
+Поэтому простого удаления `endpoint` недостаточно.
 
-- проверяет Debian 12 и права `root`;
-- запрещает параллельный запуск установщиков;
-- скачивает свежий официальный установщик;
-- проверяет наличие ожидаемых команд `installlocal` и `upgradeall`;
-- удаляет `restapps` и `endpoint` перед `installlocal`;
-- заменяет массовый `upgradeall` на информационное сообщение;
-- запускает оставшуюся официальную установку с `--skipversion`.
+## Что делает версия 0.4.0
 
-### `resume.sh`
+`install.sh`:
 
-Для частично установленной системы после зависания официального скрипта. Скрипт:
+1. исключает `sangomaconnect`, `restapps` и `endpoint` до `installlocal`;
+2. полностью пропускает `fwconsole ma upgradeall`;
+3. полностью пропускает массовый `fwconsole ma refreshsignatures`;
+4. проверяет, что активные вызовы этих операций действительно удалены из временного скрипта;
+5. продолжает остальные официальные этапы установки и проверки.
 
-- собирает диагностику и копию последнего журнала;
-- в режиме `--dry-run` ничего не изменяет;
-- с флагом `--stop-stuck` останавливает только известные процессы установщика, `upgradeall`, `restapps` и `endpoint`;
-- завершает незаконченные операции `dpkg`;
-- сохраняет резервные копии и удаляет `restapps`/`endpoint`;
-- скачивает актуальный `install.sh`;
-- продолжает установку без массового обновления модулей;
-- проверяет `fwconsole` и основные службы.
+`resume.sh` предназначен для системы, где официальный или предыдущий изменённый установщик уже завис. Он:
+
+- сохраняет диагностику и последний журнал;
+- с `--stop-stuck` останавливает только известные процессы установщика, `upgradeall`, `refreshsignatures`, `sangomaconnect`, `restapps` и `endpoint`;
+- сохраняет резервные копии трёх исключаемых модулей;
+- удаляет их штатно и убирает оставшиеся каталоги;
+- загружает `install.sh` версии 0.4.0;
+- повторно запускает установку без обеих проблемных цепочек;
+- проверяет FreePBX и основные службы.
 
 ## Новая установка
 
@@ -72,25 +68,18 @@ cd /tmp
 wget "https://raw.githubusercontent.com/ravigodno/freepbx_install/main/install.sh?$(date +%s)" \
   -O install-freepbx17.sh
 chmod +x install-freepbx17.sh
+bash install-freepbx17.sh --version
 bash install-freepbx17.sh --dry-run
 bash install-freepbx17.sh
 ```
 
-Перед запуском убедитесь, что версия актуальная:
-
-```bash
-bash /tmp/install-freepbx17.sh --version
-```
-
-Ожидается:
+Ожидаемая версия:
 
 ```text
-0.3.0
+0.4.0
 ```
 
 ## Доустановка после зависания
-
-Скачать актуальный скрипт восстановления:
 
 ```bash
 su -
@@ -99,35 +88,28 @@ wget "https://raw.githubusercontent.com/ravigodno/freepbx_install/main/resume.sh
   -O resume-freepbx17.sh
 chmod +x resume-freepbx17.sh
 bash resume-freepbx17.sh --version
+bash resume-freepbx17.sh --dry-run
 ```
 
-Ожидается версия `0.3.0`.
-
-Безопасная диагностика:
-
-```bash
-bash /tmp/resume-freepbx17.sh --dry-run
-```
-
-Если процессы зависшей установки ещё активны и журнал действительно перестал изменяться:
+Если процессы зависшей установки ещё активны и журнал перестал изменяться:
 
 ```bash
 bash /tmp/resume-freepbx17.sh --stop-stuck
 ```
 
-Если процессов уже нет:
+Если активных процессов уже нет:
 
 ```bash
 bash /tmp/resume-freepbx17.sh
 ```
 
-## Проверка журнала перед остановкой процессов
+## Диагностика зависания
 
 ```bash
 LOG=$(ls -1t /var/log/pbx/freepbx17-install-*.log | head -1)
 stat -c 'Изменён: %y Размер: %s байт' "$LOG"
-tail -n 50 "$LOG"
-pgrep -af 'sng_freepbx_debian_install|fwconsole ma|endpoint|restapps'
+tail -n 80 "$LOG"
+pgrep -af 'sng_freepbx_debian_install|fwconsole ma|sangomaconnect|restapps|endpoint'
 ```
 
 ## Резервные копии
@@ -142,7 +124,7 @@ pgrep -af 'sng_freepbx_debian_install|fwconsole ma|endpoint|restapps'
 
 - диагностика системы;
 - последний журнал установки и его хвост;
-- архивы каталогов `restapps` и `endpoint`;
+- архивы каталогов `sangomaconnect`, `restapps`, `endpoint`;
 - журналы штатного удаления модулей;
 - оставшиеся каталоги модулей, если штатное удаление их не убрало.
 
@@ -150,22 +132,23 @@ pgrep -af 'sng_freepbx_debian_install|fwconsole ma|endpoint|restapps'
 
 ```bash
 /usr/sbin/fwconsole --version
-/usr/sbin/fwconsole ma list | grep -iE 'endpoint|restapps|framework|core'
+/usr/sbin/fwconsole ma list | grep -iE 'sangomaconnect|endpoint|restapps|framework|core'
 systemctl is-active asterisk freepbx apache2 mariadb
+curl -I --max-time 15 http://127.0.0.1/
 ```
 
 Ожидается:
 
 - `framework` и `core` включены;
-- `endpoint` и `restapps` отсутствуют либо не установлены;
+- `sangomaconnect`, `restapps`, `endpoint` отсутствуют либо не установлены;
 - `asterisk`, `freepbx`, `apache2`, `mariadb` активны.
 
-## Важные ограничения
+## Ограничения
 
-- Без `endpoint` нельзя использовать функции Endpoint Manager.
-- `restapps` исключается, потому что его установка автоматически возвращает зависимость `endpoint`.
-- Массовое обновление модулей во время установки пропускается намеренно.
-- После завершения модули следует обновлять выборочно и не устанавливать `endpoint`/`restapps`.
+- Без `endpoint` недоступен Endpoint Manager.
+- Без `restapps` и `sangomaconnect` недоступны связанные коммерческие приложения Sangoma для телефонов и Sangoma Connect.
+- Массовые `upgradeall` и `refreshsignatures` во время установки пропускаются намеренно.
+- После установки модули следует обновлять выборочно, не устанавливая исключённую цепочку.
 - Поддерживается только Debian 12.
 - Проект не является продуктом Sangoma/FreePBX и не заменяет официальную поддержку.
 
