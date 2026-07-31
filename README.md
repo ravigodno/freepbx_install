@@ -2,93 +2,177 @@
 
 Независимый wrapper для установки **FreePBX 17 на Debian 12 без коммерческого модуля Sangoma Endpoint Manager (`endpoint`)**.
 
-> Это неофициальный проект и не является продуктом Sangoma Technologies или FreePBX. Wrapper скачивает актуальный официальный установщик FreePBX, создаёт временную локальную копию, исключает модуль `endpoint` и запускает установку.
+> Это неофициальный проект и не является продуктом Sangoma Technologies или FreePBX. Скрипты используют актуальный официальный установщик FreePBX, но исключают проблемный модуль `endpoint`.
 
-## Зачем это нужно
+## Зафиксированная проблема
 
-На некоторых установках обновление модулей FreePBX 17 останавливается на Endpoint Manager на этапе:
+На чистой установке Debian 12 официальный установщик может успешно установить пакеты `sangoma-pbx17`, `ffmpeg`, `freepbx17` и перейти к этапу:
 
 ```text
-Upgrading module 'endpoint'
+Upgrading FreePBX 17 modules
+```
+
+После этого обновление Endpoint Manager доходит до:
+
+```text
+Upgrading module 'endpoint' from 17.0.3 to 17.0.16.3
+Downloading module 'endpoint'
+...
+Checking database tables...Done
+Migrating tables as required...Done
 Checking Settings and Defaults...
 ```
 
-При этом модуль остаётся в состоянии `Disabled; Pending upgrade`, а официальный установщик не переходит к завершающим действиям.
+Дальнейшего вывода нет, а журнал установки перестаёт изменяться. При этом остаются процессы вида:
 
-Этот wrapper:
+```text
+php /usr/sbin/fwconsole ma upgradeall
+sh -c /usr/sbin/fwconsole ma install 'endpoint'
+php /usr/sbin/fwconsole ma install endpoint
+```
 
-1. проверяет, что система работает на Debian 12 и скрипт запущен от `root`;
-2. запрещает запуск второй установки параллельно;
+Состояние модулей после прерывания может выглядеть так:
+
+```text
+core       17.0.18.49  Enabled
+framework  17.0.30     Enabled
+endpoint   17.0.3      Disabled; Pending upgrade to 17.0.16.3
+```
+
+То есть сам FreePBX уже частично установлен, но официальный скрипт не выполняет завершающие шаги после `fwconsole ma upgradeall`.
+
+## Что находится в репозитории
+
+### `install.sh`
+
+Используется для новой установки. Он:
+
+1. проверяет Debian 12 и права `root`;
+2. запрещает параллельный запуск установщиков;
 3. скачивает свежий официальный скрипт FreePBX;
-4. проверяет ожидаемую структуру скрипта;
-5. перед `fwconsole ma installlocal` удаляет `endpoint` и его каталог;
-6. запускает остальные штатные шаги официального установщика;
-7. сохраняет исходную и изменённую копии в `/tmp/freepbx-install-no-endpoint`.
+4. проверяет ожидаемую структуру официального скрипта;
+5. исключает `endpoint` перед `fwconsole ma installlocal`;
+6. запускает остальные штатные шаги официального установщика.
 
-## Быстрая установка
+### `resume.sh`
 
-Войдите под `root` через полноценное окружение:
+Используется, если установка уже запускалась официальным скриптом и зависла на `endpoint`. Он:
+
+1. проверяет наличие установленного пакета `freepbx17` и `/usr/sbin/fwconsole`;
+2. сохраняет диагностику и журнал в `/root/freepbx-install-recovery-ДАТА-ВРЕМЯ`;
+3. в режиме `--dry-run` ничего не останавливает и не меняет в системе;
+4. по явному флагу `--stop-stuck` завершает только известные зависшие процессы;
+5. сохраняет резервную копию каталога Endpoint Manager;
+6. исключает `endpoint`;
+7. запускает актуальный `install.sh`, чтобы официальный процесс повторно проверил уже установленные пакеты и выполнил оставшиеся шаги;
+8. проверяет `fwconsole` и состояние основных служб.
+
+## Новая установка
+
+Сначала войдите в полноценное окружение `root`:
 
 ```bash
 su -
 ```
 
-Скачайте и запустите wrapper:
+Затем выполните:
 
 ```bash
 cd /tmp
 wget https://raw.githubusercontent.com/ravigodno/freepbx_install/main/install.sh \
   -O install-freepbx17.sh
 chmod +x install-freepbx17.sh
+bash install-freepbx17.sh --dry-run
 bash install-freepbx17.sh
 ```
 
-## Предварительная проверка без установки
+## Доустановка после зависания официального скрипта
+
+### 1. Скачать `resume.sh`
 
 ```bash
-bash install-freepbx17.sh --dry-run
+cd /tmp
+wget https://raw.githubusercontent.com/ravigodno/freepbx_install/main/resume.sh \
+  -O resume-freepbx17.sh
+chmod +x resume-freepbx17.sh
 ```
 
-Wrapper скачает официальный скрипт, проверит и изменит его, но не запустит установку.
-
-## Передача параметров официальному установщику
-
-Все неизвестные wrapper параметры передаются официальному скрипту без изменений. Например:
+### 2. Выполнить безопасную диагностику
 
 ```bash
-bash install-freepbx17.sh --nochrony
+bash /tmp/resume-freepbx17.sh --dry-run
 ```
 
-Параметр `--skipversion` wrapper добавляет автоматически, поскольку локальная временная копия официального скрипта намеренно отличается от оригинала.
+Скрипт покажет найденные процессы и сохранит диагностический каталог в `/root`. Процессы, пакеты и системная конфигурация не изменяются.
 
-## Повторный запуск после зависания на `endpoint`
+### 3. Если зависшие процессы ещё активны
 
-Сначала проверьте процессы:
+Перед остановкой убедитесь, что размер и время изменения журнала не меняются:
 
 ```bash
-pgrep -af 'sng_freepbx_debian_install|fwconsole ma|endpoint'
+LOG=$(ls -1t /var/log/pbx/freepbx17-install-*.log | head -1)
+stat -c 'Изменён: %y Размер: %s байт' "$LOG"
+tail -n 30 "$LOG"
 ```
 
-Если старый установщик действительно не меняет лог продолжительное время, завершите только связанные процессы:
+После подтверждения зависания:
 
 ```bash
-pkill -TERM -f '[s]ng_freepbx_debian_install.sh' 2>/dev/null || true
-pkill -TERM -f '[f]wconsole ma upgradeall' 2>/dev/null || true
-pkill -TERM -f '[f]wconsole ma install endpoint' 2>/dev/null || true
-sleep 10
-pgrep -af 'sng_freepbx_debian_install|fwconsole ma|endpoint' || true
+bash /tmp/resume-freepbx17.sh --stop-stuck
 ```
 
-После остановки старого установщика:
+Флаг `--stop-stuck` останавливает только процессы, соответствующие следующим командам:
+
+```text
+sng_freepbx_debian_install.sh
+fwconsole ma upgradeall
+fwconsole ma install endpoint
+```
+
+Сначала отправляется `TERM`, затем после ожидания — `KILL` только оставшимся совпавшим процессам.
+
+### 4. Если старые процессы уже остановлены
 
 ```bash
-rm -f /var/run/freepbx17_installer.pid
-dpkg --configure -a
-apt-get -f install -y
-bash /tmp/install-freepbx17.sh
+bash /tmp/resume-freepbx17.sh
 ```
 
-Официальный установщик повторно проверяет уже установленные пакеты, поэтому завершённые пакетные этапы обычно не устанавливаются заново.
+## Важное замечание про `su -`
+
+Команда:
+
+```bash
+su -
+```
+
+открывает новый login-shell `root`. После появления приглашения вида:
+
+```text
+root@server:~#
+```
+
+остальные команды нужно выполнять уже в этом новом shell. Именно `su -`, а не обычный `su`, добавляет `/usr/sbin` в `PATH`. При необходимости `fwconsole` всегда можно вызвать абсолютным путём:
+
+```bash
+/usr/sbin/fwconsole --version
+```
+
+## Где сохраняются резервные копии
+
+`resume.sh` создаёт каталог:
+
+```text
+/root/freepbx-install-recovery-YYYYMMDD-HHMMSS/
+```
+
+В него попадают:
+
+- общая диагностика системы;
+- копия последнего журнала официальной установки;
+- последние 200 строк журнала;
+- вывод удаления `endpoint`;
+- архив каталога модуля `endpoint`;
+- оставшийся каталог модуля, если штатное удаление его не удалило.
 
 ## Проверка после установки
 
@@ -102,7 +186,7 @@ systemctl --no-pager --full status asterisk freepbx apache2 mariadb
 
 ## Что не устанавливается
 
-Исключается только модуль:
+Исключается только:
 
 ```text
 endpoint — Sangoma Endpoint Manager
@@ -113,8 +197,8 @@ endpoint — Sangoma Endpoint Manager
 ## Ограничения
 
 - Поддерживается только Debian 12, как и в текущем официальном установщике FreePBX 17.
-- Wrapper зависит от структуры официального скрипта. Если Sangoma изменит нужный участок, wrapper остановится до запуска установки.
-- Установка выполняется с правами `root` и меняет системные пакеты и конфигурацию. Используйте резервную копию или снимок виртуальной машины.
+- Скрипты зависят от структуры официального установщика. Если Sangoma изменит нужный участок, `install.sh` остановится до запуска установки.
+- `resume.sh` предназначен только для частично установленного FreePBX, когда пакет `freepbx17` и `fwconsole` уже присутствуют.
 - Проект не предоставляет гарантий и не заменяет официальную поддержку FreePBX/Sangoma.
 
 ## Лицензии
