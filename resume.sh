@@ -6,7 +6,8 @@
 
 set -Eeuo pipefail
 
-readonly RESUME_VERSION="0.4.1"
+readonly RESUME_VERSION="0.4.2"
+readonly SANE_PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 readonly INSTALLER_URL="https://raw.githubusercontent.com/ravigodno/freepbx_install/main/install.sh"
 readonly WORK_ROOT="/root"
 readonly RUN_ID="$(date '+%Y%m%d-%H%M%S')"
@@ -15,6 +16,10 @@ readonly INSTALLER_PATH="/tmp/freepbx-install-no-endpoint.sh"
 readonly PID_FILE="/var/run/freepbx17_installer.pid"
 readonly MODULE_ROOT="/var/www/html/admin/modules"
 readonly EXCLUDED_MODULES=(sangomaconnect restapps endpoint)
+
+# dpkg requires root administration utilities such as ldconfig and
+# start-stop-daemon to be available in PATH. Do not depend on the shell's PATH.
+export PATH="$SANE_PATH"
 
 DRY_RUN=false
 STOP_STUCK=false
@@ -69,6 +74,7 @@ collect_diagnostics() {
 
   {
     printf 'Collected: %s\n\n' "$(date --iso-8601=seconds)"
+    printf 'PATH=%s\n' "$PATH"
     uname -a
     printf '\n=== OS ===\n'
     cat /etc/os-release
@@ -146,8 +152,8 @@ validate_environment() {
   [[ "${ID:-}" == "debian" && "${VERSION_ID:-}" == "12" ]] || \
     fail "поддерживается только Debian 12; обнаружено: ${PRETTY_NAME:-неизвестно}"
 
-  for command_name in wget pgrep timeout tar dpkg-query dpkg apt-get grep sort; do
-    command -v "$command_name" >/dev/null 2>&1 || fail "не найдена команда: $command_name"
+  for command_name in wget pgrep timeout tar dpkg-query dpkg apt-get grep sort ldconfig start-stop-daemon; do
+    command -v "$command_name" >/dev/null 2>&1 || fail "не найдена команда: $command_name; PATH=$PATH"
   done
 
   if [[ -x /usr/sbin/fwconsole ]]; then
