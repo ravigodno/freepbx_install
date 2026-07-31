@@ -2,18 +2,19 @@
 # SPDX-License-Identifier: MIT
 #
 # Resume a partially completed FreePBX 17 installation that stalled while
-# upgrading the Sangoma Endpoint Manager module.
+# upgrading the Sangoma Endpoint Manager module or a dependent module.
 
 set -Eeuo pipefail
 
-readonly RESUME_VERSION="0.2.0"
+readonly RESUME_VERSION="0.3.0"
 readonly INSTALLER_URL="https://raw.githubusercontent.com/ravigodno/freepbx_install/main/install.sh"
 readonly WORK_ROOT="/root"
 readonly RUN_ID="$(date '+%Y%m%d-%H%M%S')"
 readonly RECOVERY_DIR="${WORK_ROOT}/freepbx-install-recovery-${RUN_ID}"
 readonly INSTALLER_PATH="/tmp/freepbx-install-no-endpoint.sh"
 readonly PID_FILE="/var/run/freepbx17_installer.pid"
-readonly ENDPOINT_DIR="/var/www/html/admin/modules/endpoint"
+readonly MODULE_ROOT="/var/www/html/admin/modules"
+readonly EXCLUDED_MODULES=(restapps endpoint)
 
 DRY_RUN=false
 STOP_STUCK=false
@@ -28,8 +29,8 @@ usage() {
 Параметры:
   --dry-run      Собрать диагностику и показать найденные процессы.
                  Процессы, пакеты и системная конфигурация не изменяются.
-  --stop-stuck   Остановить только известные зависшие процессы официального
-                 установщика и Endpoint Manager, затем продолжить восстановление.
+  --stop-stuck   Остановить только известные зависшие процессы установщика,
+                 endpoint/restapps и upgradeall, затем продолжить восстановление.
   -h, --help     Показать справку.
   -V, --version  Показать версию.
 
@@ -48,16 +49,16 @@ fail() {
 
 find_stuck_pids() {
   {
-    pgrep -f '[s]ng_freepbx_debian_install\.sh' || true
+    pgrep -f '[s]ng_freepbx_debian_install[^ ]*\.sh' || true
     pgrep -f '[f]wconsole ma upgradeall' || true
-    pgrep -f "[f]wconsole ma install ['\"]?endpoint['\"]?" || true
+    pgrep -f "[f]wconsole ma install ['\"]?(endpoint|restapps)['\"]?" || true
   } | sort -nu
 }
 
 show_stuck_processes() {
-  pgrep -af '[s]ng_freepbx_debian_install\.sh' || true
+  pgrep -af '[s]ng_freepbx_debian_install[^ ]*\.sh' || true
   pgrep -af '[f]wconsole ma upgradeall' || true
-  pgrep -af "[f]wconsole ma install ['\"]?endpoint['\"]?" || true
+  pgrep -af "[f]wconsole ma install ['\"]?(endpoint|restapps)['\"]?" || true
 }
 
 collect_diagnostics() {
@@ -73,7 +74,7 @@ collect_diagnostics() {
     printf '\n=== FREEPBX VERSION ===\n'
     timeout 60 "$FWCONSOLE" --version || true
     printf '\n=== CORE MODULES ===\n'
-    timeout 60 "$FWCONSOLE" ma list | grep -iE 'endpoint|framework|core' || true
+    timeout 60 "$FWCONSOLE" ma list | grep -iE 'endpoint|restapps|framework|core' || true
     printf '\n=== PACKAGE STATE ===\n'
     dpkg-query -W -f='${Package}\t${Status}\t${Version}\n' freepbx17 2>/dev/null || true
   } >"${RECOVERY_DIR}/diagnostics.txt" 2>&1
@@ -82,7 +83,7 @@ collect_diagnostics() {
   latest_log=$(ls -1t /var/log/pbx/freepbx17-install-*.log 2>/dev/null | head -1 || true)
   if [[ -n "$latest_log" && -f "$latest_log" ]]; then
     cp -a "$latest_log" "$RECOVERY_DIR/"
-    tail -n 200 "$latest_log" >"${RECOVERY_DIR}/latest-install-log-tail.txt" || true
+    tail -n 250 "$latest_log" >"${RECOVERY_DIR}/latest-install-log-tail.txt" || true
   fi
 
   log "Диагностика сохранена: $RECOVERY_DIR"
@@ -109,25 +110,28 @@ stop_known_stuck_processes() {
   ((${#stuck_pids[@]} == 0)) || fail "не удалось остановить процессы: ${stuck_pids[*]}"
 }
 
-backup_endpoint_module() {
-  [[ -d "$ENDPOINT_DIR" ]] || return 0
-  log "Сохраняю резервную копию Endpoint Manager"
-  tar -C "$(dirname "$ENDPOINT_DIR")" -czf "${RECOVERY_DIR}/endpoint-module.tgz" "$(basename "$ENDPOINT_DIR")"
-}
+backup_and_exclude_modules() {
+  local module_name module_dir
 
-exclude_endpoint_module() {
-  backup_endpoint_module
+  for module_name in "${EXCLUDED_MODULES[@]}"; do
+    module_dir="${MODULE_ROOT}/${module_name}"
 
-  log "Пытаюсь штатно удалить модуль endpoint с ограничением 180 секунд"
-  timeout --kill-after=15s 180s "$FWCONSOLE" ma -f remove endpoint \
-    >"${RECOVERY_DIR}/endpoint-remove.log" 2>&1 || true
+    if [[ -d "$module_dir" ]]; then
+      log "Сохраняю резервную копию модуля $module_name"
+      tar -C "$MODULE_ROOT" -czf "${RECOVERY_DIR}/${module_name}-module.tgz" "$module_name"
+    fi
 
-  if [[ -d "$ENDPOINT_DIR" ]]; then
-    log "Перемещаю оставшийся каталог endpoint в резервную копию"
-    mv "$ENDPOINT_DIR" "${RECOVERY_DIR}/endpoint-module-directory"
-  fi
+    log "Пытаюсь штатно удалить модуль $module_name с ограничением 180 секунд"
+    timeout --kill-after=15s 180s "$FWCONSOLE" ma -f remove "$module_name" \
+      >"${RECOVERY_DIR}/${module_name}-remove.log" 2>&1 || true
 
-  [[ ! -d "$ENDPOINT_DIR" ]] || fail "каталог endpoint всё ещё существует: $ENDPOINT_DIR"
+    if [[ -d "$module_dir" ]]; then
+      log "Перемещаю оставшийся каталог $module_name в резервную копию"
+      mv "$module_dir" "${RECOVERY_DIR}/${module_name}-module-directory"
+    fi
+
+    [[ ! -d "$module_dir" ]] || fail "каталог модуля всё ещё существует: $module_dir"
+  done
 }
 
 validate_environment() {
@@ -204,7 +208,7 @@ if [[ "$DRY_RUN" == "true" ]]; then
   exit 0
 fi
 
-if ! pgrep -f '[s]ng_freepbx_debian_install\.sh' >/dev/null 2>&1; then
+if ! pgrep -f '[s]ng_freepbx_debian_install[^ ]*\.sh' >/dev/null 2>&1; then
   rm -f "$PID_FILE"
 fi
 
@@ -212,7 +216,7 @@ log "Завершаю незаконченные операции dpkg"
 dpkg --configure -a
 apt-get -f install -y
 
-exclude_endpoint_module
+backup_and_exclude_modules
 
 log "Скачиваю актуальный install.sh"
 wget --https-only --secure-protocol=TLSv1_2 --timeout=30 --tries=3 \
@@ -221,12 +225,12 @@ wget --https-only --secure-protocol=TLSv1_2 --timeout=30 --tries=3 \
 grep -q '^#!/usr/bin/env bash' "$INSTALLER_PATH" || fail "неожиданное содержимое install.sh"
 chmod 0700 "$INSTALLER_PATH"
 
-log "Повторно запускаю официальный процесс через wrapper без endpoint"
+log "Повторно запускаю официальный процесс без endpoint/restapps и без upgradeall"
 bash "$INSTALLER_PATH" "${INSTALLER_ARGS[@]}"
 
 log "Проверяю результат"
 timeout 60 "$FWCONSOLE" --version
-if timeout 60 "$FWCONSOLE" ma list | grep -iE 'endpoint|framework|core'; then
+if timeout 60 "$FWCONSOLE" ma list | grep -iE 'endpoint|restapps|framework|core'; then
   true
 fi
 
