@@ -19,7 +19,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y shellcheck
 
       - name: Check shell scripts
-        run: shellcheck install.sh
+        run: shellcheck install.sh resume.sh
 
       - name: Check Bash syntax
-        run: bash -n install.sh
+        run: bash -n install.sh && bash -n resume.sh
