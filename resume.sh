@@ -6,7 +6,7 @@
 
 set -Eeuo pipefail
 
-readonly RESUME_VERSION="0.4.0"
+readonly RESUME_VERSION="0.4.1"
 readonly INSTALLER_URL="https://raw.githubusercontent.com/ravigodno/freepbx_install/main/install.sh"
 readonly WORK_ROOT="/root"
 readonly RUN_ID="$(date '+%Y%m%d-%H%M%S')"
@@ -79,7 +79,7 @@ collect_diagnostics() {
     printf '\n=== CORE MODULES ===\n'
     timeout 60 "$FWCONSOLE" ma list | grep -iE 'sangomaconnect|endpoint|restapps|framework|core' || true
     printf '\n=== PACKAGE STATE ===\n'
-    dpkg-query -W -f='${Package}\t${Status}\t${Version}\n' freepbx17 2>/dev/null || true
+    dpkg-query -W -f='${Package}\t${db:Status-Abbrev}\t${Status}\t${Version}\n' freepbx17 2>/dev/null || true
   } >"${RECOVERY_DIR}/diagnostics.txt" 2>&1
 
   local latest_log=""
@@ -158,8 +158,11 @@ validate_environment() {
     fail "fwconsole не найден; для новой установки используйте install.sh"
   fi
 
-  dpkg-query -W -f='${Status}' freepbx17 2>/dev/null | grep -q 'install ok installed' || \
-    fail "пакет freepbx17 не установлен; для новой установки используйте install.sh"
+  if dpkg-query -W -f='${Status}' freepbx17 2>/dev/null | grep -q 'install ok installed'; then
+    log "Пакет freepbx17 зарегистрирован как установленный"
+  else
+    log "ПРЕДУПРЕЖДЕНИЕ: dpkg не считает freepbx17 полностью установленным; восстановление будет продолжено, поскольку fwconsole найден"
+  fi
 }
 
 while (($#)); do
